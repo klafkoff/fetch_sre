@@ -148,6 +148,12 @@ func check(site HealthCheck) bool {
 
 	req, err := http.NewRequest(method, site.URL, bytes.NewBufferString(site.Body))
 
+	if site.Headers != nil {
+		for k, v := range site.Headers {
+			req.Header.Add(k, v)
+		}
+	}
+
 	if err != nil {
 		return false
 	}
