@@ -1,0 +1,20 @@
+- headers:
+    user-agent: fetch-synthetic-monitor
+  method: GET
+  name: fetch index page
+  url: http://localhost/
+- headers:
+    user-agent: fetch-synthetic-monitor
+  method: GET
+  name: fetch careers page
+  url: http://localhost/careers
+- body: '{"foo":"bar"}'
+  headers:
+    content-type: application/json
+    user-agent: fetch-synthetic-monitor
+    foo: bar
+  method: POST
+  name: fetch some fake post endpoint
+  url: http://localhost/some/post/endpoint
+- name: fetch rewards index page
+  url: http://localhost.localdomain/

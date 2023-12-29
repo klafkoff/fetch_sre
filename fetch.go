@@ -1,3 +1,27 @@
+/*
+ fetch HTTP HealthCheck
+
+ Author:
+   kyle.lafkoff@gmail.com
+
+ Usage:
+   go run fetch.go fetch.yaml
+
+   go build fetch.go
+   ./fetch fetch.yaml
+
+ About:
+   The fetch HTTP HealthCheck program will attempt to connect to the sites
+   defined in a yaml file every 15 seconds and report back if UP or DOWN,
+   with a percentage of uptime.
+
+ Criteria for UP:
+   1. 2xx HTTP Response code
+   2. Response returns within the 500ms threshold
+
+ See README.md for information on installing dependencies
+*/
+
 package main
 
 import (
@@ -8,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -47,12 +72,25 @@ type HealthCheck struct {
 	hostname string            `yaml:"-"`
 }
 
-// Data structure for tracking percent of uptime for domains of a URL
-// Hostname with two additional k/v: "count":int, "success":int
-//   - count:   number of connection attempts
-//   - success: number of succcessful attempts
-// ["fetch.com"][string]int{ count:0, success:0 }
-var HealthCheckStatus = make(map[string]map[string]int)
+// Result is the data structure to store the history of attempts
+type Result struct {
+	Attempt float64
+	Success float64
+}
+
+// Calculate successful percentage of uptime for the domains of each URL
+func (r Result) Uptime() int {
+	if r.Attempt == 0 {
+		return 0
+	}
+	return int(math.Round(100 * (r.Success / r.Attempt)))
+}
+
+// Thread-safe structure for tracking percent uptime of domains
+type Results struct {
+	lock  sync.Locker
+	Sites map[string]*Result
+}
 
 // HTTP Request timeout set in milliseconds
 var responseTimeout int = 500
@@ -61,7 +99,6 @@ var responseTimeout int = 500
 var outputTimeout int = 15
 
 func main() {
-
 	if len(os.Args) < 2 {
 		fmt.Printf("Usage: %s <configFile.yaml>\n", os.Args[0])
 		os.Exit(-1)
@@ -81,9 +118,12 @@ func main() {
 		os.Exit(-1)
 	}
 
-	// Loop through the yaml file
-	for i, hc := range healthcheck {
+	status := &Results{
+		lock:  new(sync.Mutex),
+		Sites: make(map[string]*Result),
+	}
 
+	for i, hc := range healthcheck {
 		// Sanity checks
 		if hc.Name == "" {
 			fmt.Printf("Error: Required name not found\n")
@@ -101,71 +141,70 @@ func main() {
 			fmt.Printf("Error: Cant parse URL: %s", hc.URL)
 			os.Exit(-1)
 		}
-		hostname := address.Hostname()
-		healthcheck[i].hostname = hostname
-		// Here we setup a little data structure to track the status of the URL domains
-		HealthCheckStatus[hostname] = map[string]int{"count": 0, "success": 0}
-
+		healthcheck[i].hostname = address.Hostname()
+		status.Sites[healthcheck[i].hostname] = new(Result)
 	}
 
 	for {
+		wg := new(sync.WaitGroup)
+		wg.Add(len(healthcheck))
+
 		for _, hc := range healthcheck {
-			success := check(hc)
-			HealthCheckStatus[hc.hostname]["count"]++
-			if success {
-				HealthCheckStatus[hc.hostname]["success"]++
-			}
+			go func(hc HealthCheck) {
+				success := check(hc)
+				status.lock.Lock()
+				status.Sites[hc.hostname].Attempt++
+				if success {
+					status.Sites[hc.hostname].Success++
+				}
+				status.lock.Unlock()
+				wg.Done()
+			}(hc)
 		}
+		wg.Wait()
 
 		// Output percentage of uptime for the domains of each URL
-		// Formula: 100 * (number of HTTP requests that had an outcome of UP / number of HTTP requests)
-		for host, _ := range HealthCheckStatus {
-			success := HealthCheckStatus[host]["success"]
-			count := HealthCheckStatus[host]["count"]
-			uptime := int(math.Round(100 * (float64(success) / float64(count))))
-			//log.Printf("%s has %d%% availablity percentage (count: %d) (success: %d)\n", host, uptime, count, success)
-			fmt.Printf("%s has %d%% availablity percentage\n", host, uptime)
+		for host, res := range status.Sites {
+			fmt.Printf("%s has %d%% availablity percentage\n", host, res.Uptime())
 		}
 
 		// Delay polling
 		time.Sleep(time.Duration(outputTimeout) * time.Second)
-
 	}
 }
 
+// Simple HTTP request function
 func check(site HealthCheck) bool {
+
+	// HTTP Client with timeout defined above as global variable responseTimeout
+	client := http.Client{
+		Timeout: time.Duration(responseTimeout) * time.Millisecond,
+	}
 
 	method := "GET"
 	if site.Method != "" {
 		method = site.Method
 	}
 
-	// HTTP Client with timeout defined above as global var
-	// Set timeout defined above as global variable
-	client := http.Client{
-		Timeout: time.Duration(responseTimeout) * time.Millisecond,
+	req, err := http.NewRequest(method, site.URL, bytes.NewBufferString(site.Body))
+	if err != nil {
+		return false
 	}
 
-	req, err := http.NewRequest(method, site.URL, bytes.NewBufferString(site.Body))
-
+	// Add The headers
 	if site.Headers != nil {
 		for k, v := range site.Headers {
 			req.Header.Add(k, v)
 		}
 	}
 
-	if err != nil {
-		return false
-	}
-
-	//fmt.Printf("Attempting to connect to: %s\n", site.URL)
 	resp, err := client.Do(req)
-
 	if err != nil {
 		return false
 	}
 
 	defer resp.Body.Close()
+
 	// Response code must be between 200 and 299 otherwise it is considered down
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
 		return true
